@@ -1,0 +1,12 @@
+{
+  "name": "online-quiz-app",
+  "version": "1.0.0",
+  "description": "Online quiz platform with student, faculty and admin roles and anti-cheat flagging. Zero dependencies (Node 22.5+).",
+  "main": "server.js",
+  "engines": { "node": ">=22.5" },
+  "scripts": {
+    "start": "node --no-warnings server.js",
+    "test": "node --no-warnings test.js"
+  },
+  "license": "MIT"
+}
