@@ -1,0 +1,267 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>QuizHub - Quiz</title>
+<link rel="stylesheet" href="/css/style.css">
+</head>
+<body>
+<div id="root"></div>
+<div id="banner" class="hidden" style="position:fixed;top:56px;left:50%;transform:translateX(-50%);z-index:90;background:var(--bad);color:#fff;padding:10px 18px;border-radius:10px;font-weight:600;box-shadow:var(--shadow);max-width:92vw;text-align:center"></div>
+
+<script src="/js/common.js"></script>
+<script>
+const user = App.guard('student');
+const { esc } = App;
+const params = new URLSearchParams(location.search);
+const attemptId = params.get('attempt');
+const root = document.getElementById('root');
+if (!attemptId) location.href = '/student.html';
+
+if (params.get('view') === 'result') showResult(); else startQuiz();
+
+// =====================================================================
+//  RESULT VIEW
+// =====================================================================
+async function showResult() {
+  root.innerHTML = '<div class="container"><p class="muted">Loading...</p></div>';
+  try {
+    const r = await App.get(`/api/student/attempts/${attemptId}/result`);
+    const reasons = { time_up: 'Your time ran out, so the quiz was submitted automatically.', violation_limit: 'Your quiz was submitted automatically because you exceeded the allowed number of rule violations.', faculty: 'Your quiz was submitted by your faculty.' };
+    let html = `<div class="container"><p><a href="/student.html">&larr; Back to dashboard</a></p><div class="card"><h2>${esc(r.title)}</h2>`;
+    if (r.status === 'auto_submitted') html += `<div class="alert err">${esc(reasons[r.reason] || 'Auto-submitted.')}</div>`;
+    if (r.show_result) {
+      html += `<div class="grid stats" style="margin:12px 0"><div class="stat"><b>${r.score} / ${r.total}</b><span>Score</span></div>
+        <div class="stat"><b>${r.percent}%</b><span>Percentage</span></div>
+        <div class="stat"><b>${r.passed ? 'Pass' : 'Fail'}</b><span>Pass mark ${r.pass_percent}%</span></div>
+        <div class="stat ${r.violations ? 'alert' : ''}"><b>${r.violations}</b><span>Rule violations</span></div></div>`;
+    } else {
+      html += `<div class="alert info">Your quiz has been submitted. Your faculty has chosen not to show scores yet.</div><p>Rule violations recorded: <b>${r.violations}</b></p>`;
+    }
+    html += '</div>';
+    if (r.review) {
+      html += '<h3 style="margin:18px 0 8px">Answer review</h3>';
+      r.review.forEach((q, i) => {
+        const fmtAns = (v) => {
+          if (v === null || v === undefined) return '<i>not answered</i>';
+          if (q.type === 'text') return esc(v);
+          const arr = Array.isArray(v) ? v : [v];
+          return arr.map((x) => esc(q.options[x])).join(', ');
+        };
+        const correct = q.type === 'text' ? q.correct.map(esc).join(' / ') : q.correct.map((x) => esc(q.options[x])).join(', ');
+        const cls = q.status === 'correct' ? 'ans-ok' : q.status === 'wrong' ? 'ans-bad' : 'muted';
+        html += `<div class="q-item"><div class="row between"><b>Q${i + 1}. ${esc(q.text)}</b><span class="badge ${q.status === 'correct' ? 'ok' : q.status === 'wrong' ? 'bad' : 'gray'}">${q.awarded > 0 ? '+' : ''}${+q.awarded.toFixed(2)} / ${q.marks}</span></div>
+          <p style="margin:.4rem 0">Your answer: <span class="${cls}">${fmtAns(q.your_answer)}</span></p>
+          ${q.status !== 'correct' ? `<p style="margin:.2rem 0">Correct answer: <span class="ans-ok">${correct}</span></p>` : ''}
+          ${q.explanation ? `<p class="muted small" style="margin:.4rem 0 0">${esc(q.explanation)}</p>` : ''}</div>`;
+      });
+    }
+    root.innerHTML = html + '</div>';
+  } catch (e) { root.innerHTML = `<div class="container"><div class="alert err">${esc(e.message)}</div><a href="/student.html">Back</a></div>`; }
+}
+
+// =====================================================================
+//  QUIZ VIEW  (with anti-cheat monitoring)
+// =====================================================================
+let data, current = 0, answers = {}, marked = new Set(), deadline = 0, violations = 0, maxViolations = 0;
+let monitoring = false, submitted = false, lastVio = {}, fsOverlay = null;
+const fsSupported = !!document.documentElement.requestFullscreen;
+
+async function startQuiz() {
+  try {
+    data = await App.get(`/api/student/attempts/${attemptId}?resume=1`);
+  } catch (e) { root.innerHTML = `<div class="container"><div class="alert err">${esc(e.message)}</div><a href="/student.html">Back</a></div>`; return; }
+  if (data.finished) return finish(data.reason);
+  answers = data.answers || {}; violations = data.violations; maxViolations = data.quiz.max_violations;
+  deadline = Date.now() + data.remaining_seconds * 1000;
+
+  // "Begin" gate: needs a click so the browser allows fullscreen
+  root.innerHTML = `<div class="auth-wrap"><div class="card auth-card center">
+      <h2>${esc(data.quiz.title)}</h2>
+      <p class="muted">${data.questions.length} questions &middot; ${Math.ceil(data.remaining_seconds / 60)} min left</p>
+      ${violations ? `<div class="alert err">You already have ${violations} violation(s) recorded.</div>` : ''}
+      <p class="small">The quiz will open in fullscreen. Leaving fullscreen, switching tabs or closing the page is recorded.</p>
+      <button class="btn block" id="begin">Enter fullscreen &amp; begin</button></div></div>`;
+  document.getElementById('begin').onclick = async () => {
+    if (fsSupported) { try { await document.documentElement.requestFullscreen(); } catch { /* user denied; continue, but exit is still tracked */ } }
+    renderQuiz(); armMonitoring();
+  };
+}
+
+function renderQuiz() {
+  root.innerHTML = `
+    <div class="quiz-bar">
+      <div><b>${esc(data.quiz.title)}</b></div><div class="spacer"></div>
+      <span class="vio-chip" id="vio" title="Rule violations">Violations: <span id="vio-n">0</span>${maxViolations ? ' / ' + maxViolations : ''}</span>
+      <span class="timer" id="timer">--:--</span>
+      <button class="btn" id="submit-btn">Submit</button>
+    </div>
+    <div class="container"><div class="q-layout">
+      <div class="card noselect" id="qcard"></div>
+      <div class="card"><h3>Questions</h3><div class="palette" id="palette"></div>
+        <p class="small muted" style="margin:.8rem 0 0"><span class="badge ok">green</span> answered &nbsp; <span class="badge warn">yellow</span> marked</p></div>
+    </div></div>`;
+  document.getElementById('submit-btn').onclick = confirmSubmit;
+  updateVio(); drawQuestion(); tickTimer(); setInterval(tickTimer, 500); setInterval(heartbeat, 10000);
+}
+
+function drawQuestion() {
+  const q = data.questions[current], saved = answers[q.id];
+  const hint = { single: 'Choose one answer', truefalse: 'True or false', multiple: 'Choose all that apply', text: 'Type your answer' }[q.type];
+  let body = '';
+  if (q.type === 'text') body = `<input id="textans" autocomplete="off" placeholder="Your answer" value="${esc(saved || '')}" style="user-select:text">`;
+  else body = q.options.map((o) => {
+    const sel = q.type === 'multiple' ? Array.isArray(saved) && saved.includes(o.i) : saved === o.i;
+    return `<label class="opt ${sel ? 'sel' : ''}"><input type="${q.type === 'multiple' ? 'checkbox' : 'radio'}" name="opt" value="${o.i}" ${sel ? 'checked' : ''}><span>${esc(o.text)}</span></label>`;
+  }).join('');
+  document.getElementById('qcard').innerHTML = `
+    <div class="row between"><span class="muted small">Question ${current + 1} of ${data.questions.length} &middot; ${q.marks} mark${q.marks === 1 ? '' : 's'}</span><span class="muted small">${hint}</span></div>
+    <h3 style="margin:.6rem 0 .8rem;font-size:1.1rem;white-space:pre-wrap">${esc(q.text)}</h3>${body}
+    <div class="row between" style="margin-top:18px">
+      <div class="row"><button class="btn ghost" id="prev" ${current === 0 ? 'disabled' : ''}>Previous</button><button class="btn ghost" id="mark">${marked.has(q.id) ? 'Unmark' : 'Mark for review'}</button><button class="btn ghost" id="clear">Clear</button></div>
+      <button class="btn" id="next" ${current === data.questions.length - 1 ? 'disabled' : ''}>Next</button></div>
+    <p class="small muted" id="saved" style="margin:.6rem 0 0"></p>`;
+  const card = document.getElementById('qcard');
+  card.querySelectorAll('input[name=opt]').forEach((inp) => inp.onchange = () => {
+    let val;
+    if (q.type === 'multiple') val = [...card.querySelectorAll('input[name=opt]:checked')].map((x) => Number(x.value));
+    else val = Number(inp.value);
+    card.querySelectorAll('.opt').forEach((l) => l.classList.toggle('sel', l.querySelector('input').checked));
+    saveAnswer(q, val);
+  });
+  const t = document.getElementById('textans');
+  if (t) { let timer; t.oninput = () => { clearTimeout(timer); timer = setTimeout(() => saveAnswer(q, t.value.trim() || null), 500); }; }
+  document.getElementById('prev').onclick = () => go(current - 1);
+  document.getElementById('next').onclick = () => go(current + 1);
+  document.getElementById('clear').onclick = () => { saveAnswer(q, null); drawQuestion(); };
+  document.getElementById('mark').onclick = () => { marked.has(q.id) ? marked.delete(q.id) : marked.add(q.id); drawQuestion(); };
+  drawPalette();
+}
+function go(i) { current = Math.max(0, Math.min(data.questions.length - 1, i)); drawQuestion(); }
+function drawPalette() {
+  document.getElementById('palette').innerHTML = data.questions.map((q, i) => {
+    const ans = answers[q.id] !== undefined && answers[q.id] !== null;
+    return `<button class="pal-btn ${ans ? 'answered' : ''} ${i === current ? 'current' : ''}" style="${marked.has(q.id) ? 'background:var(--warn-soft);border-color:var(--warn);color:var(--warn)' : ''}" data-i="${i}">${i + 1}</button>`;
+  }).join('');
+  document.querySelectorAll('.pal-btn').forEach((b) => (b.onclick = () => go(Number(b.dataset.i))));
+}
+async function saveAnswer(q, val) {
+  if (val === null || (Array.isArray(val) && !val.length)) delete answers[q.id]; else answers[q.id] = val;
+  drawPalette();
+  const s = document.getElementById('saved'); if (s) s.textContent = 'Saving...';
+  try { await App.put(`/api/student/attempts/${attemptId}/answer`, { question_id: q.id, answer: val }); if (s) s.textContent = 'Saved'; }
+  catch (e) { if (s) s.textContent = 'Could not save (will retry on submit)'; }
+}
+
+// ---------- timer / heartbeat ----------
+function tickTimer() {
+  if (submitted) return;
+  const left = Math.max(0, Math.round((deadline - Date.now()) / 1000));
+  const t = document.getElementById('timer'); if (!t) return;
+  t.textContent = `${String(Math.floor(left / 60)).padStart(2, '0')}:${String(left % 60).padStart(2, '0')}`;
+  t.classList.toggle('low', left <= 60);
+  if (left <= 0) doSubmit('time_up');
+}
+async function heartbeat() {
+  if (submitted) return;
+  try { const r = await App.post(`/api/student/attempts/${attemptId}/heartbeat`); if (r.finished) finish(r.reason); } catch { /* offline: ignore */ }
+}
+
+// ---------- submit ----------
+function confirmSubmit() {
+  const unanswered = data.questions.filter((q) => answers[q.id] === undefined).length;
+  const m = App.modal(`<h3>Submit quiz?</h3><p>${unanswered ? `<b>${unanswered}</b> question(s) are still unanswered.` : 'You have answered every question.'} You cannot change your answers after submitting.</p>
+    <div class="row" style="justify-content:flex-end"><button class="btn ghost" id="n">Keep working</button><button class="btn" id="y">Submit now</button></div>`);
+  m.el.querySelector('#n').onclick = m.close;
+  m.el.querySelector('#y').onclick = () => { m.close(); doSubmit('student'); };
+}
+async function doSubmit(reason) {
+  if (submitted) return; submitted = true; monitoring = false;
+  try { await App.post(`/api/student/attempts/${attemptId}/submit`, { answers }); } catch (e) { App.toast(e.message); }
+  finish(reason === 'time_up' ? 'time_up' : null);
+}
+function finish(reason) {
+  submitted = true; monitoring = false;
+  window.onbeforeunload = null;
+  if (document.fullscreenElement) document.exitFullscreen().catch(() => {});
+  location.replace(`/quiz.html?attempt=${attemptId}&view=result`);
+}
+
+// =====================================================================
+//  ANTI-CHEAT MONITORING
+//  Every event below is sent to the server, which stores it in the
+//  `violations` table and increases the attempt's violation counter.
+// =====================================================================
+function updateVio() {
+  const chip = document.getElementById('vio'); if (!chip) return;
+  document.getElementById('vio-n').textContent = violations;
+  const ratio = maxViolations ? violations / maxViolations : 0;
+  chip.className = 'vio-chip' + (ratio >= 0.7 ? ' bad' : violations > 0 ? ' warn' : '');
+}
+function warn(text) {
+  const b = document.getElementById('banner'); b.textContent = text; b.classList.remove('hidden');
+  clearTimeout(warn.t); warn.t = setTimeout(() => b.classList.add('hidden'), 5000);
+}
+const MESSAGES = {
+  tab_switch: 'You switched to another tab. This has been recorded.', window_blur: 'You left the quiz window. This has been recorded.',
+  fullscreen_exit: 'You exited fullscreen. This has been recorded.', page_exit: 'Trying to leave the quiz has been recorded.',
+  copy_paste: 'Copy / paste is not allowed. Recorded.', right_click: 'Right-click is disabled. Recorded.', devtools: 'That key combination is blocked. Recorded.', print_screen: 'Print / screenshot key is blocked. Recorded.',
+};
+async function report(type, detail = '', { keepalive = false, silent = false } = {}) {
+  if (!monitoring || submitted) return;
+  const now = Date.now();
+  if (lastVio[type] && now - lastVio[type] < 1200) return;   // ignore duplicate bursts of the same event
+  lastVio[type] = now;
+  violations += 1; updateVio();                              // optimistic update
+  if (!silent) warn(`${MESSAGES[type] || 'Violation recorded.'}  (${violations}${maxViolations ? '/' + maxViolations : ''})`);
+  try {
+    const r = await App.api('POST', `/api/student/attempts/${attemptId}/violation`, { type, detail }, { keepalive });
+    violations = r.violations; updateVio();
+    if (r.finished) finish(r.reason);
+  } catch { /* if offline, server will still detect the gap via last_seen */ }
+}
+
+function armMonitoring() {
+  monitoring = true;
+  // 1) Tab switch / minimise
+  document.addEventListener('visibilitychange', () => { if (document.hidden) { lastVio._hidden = Date.now(); report('tab_switch', 'Tab hidden'); } });
+  // 2) Window loses focus (alt-tab, clicking another window). Ignored if a tab_switch was just logged.
+  window.addEventListener('blur', () => { setTimeout(() => { if (!document.hidden && !document.hasFocus() && Date.now() - (lastVio._hidden || 0) > 1500) report('window_blur', 'Window lost focus'); }, 250); });
+  // 3) Leaving fullscreen
+  document.addEventListener('fullscreenchange', () => {
+    if (!document.fullscreenElement && fsSupported && !submitted) { report('fullscreen_exit', 'Exited fullscreen'); showFsOverlay(); }
+  });
+  // 4) Closing / reloading / navigating away before submitting
+  window.onbeforeunload = (e) => {
+    if (submitted) return;
+    report('page_exit', 'Tried to close or reload', { keepalive: true, silent: true });
+    e.preventDefault(); e.returnValue = ''; return '';
+  };
+  // 5) Copy / paste / cut / right-click / selection / shortcuts
+  ['copy', 'cut', 'paste'].forEach((ev) => document.addEventListener(ev, (e) => { e.preventDefault(); report('copy_paste', ev); }));
+  document.addEventListener('contextmenu', (e) => { e.preventDefault(); report('right_click', 'Context menu'); });
+  document.addEventListener('dragstart', (e) => e.preventDefault());
+  document.addEventListener('keydown', (e) => {
+    const k = e.key.toLowerCase();
+    if (k === 'printscreen') { navigator.clipboard?.writeText('').catch(() => {}); report('print_screen', 'PrintScreen'); }
+    else if (e.key === 'F12' || (e.ctrlKey && e.shiftKey && ['i', 'j', 'c'].includes(k)) || (e.ctrlKey && ['u', 's', 'p'].includes(k)) || (e.metaKey && e.altKey && ['i', 'j', 'c', 'u'].includes(k))) {
+      e.preventDefault(); report('devtools', 'Shortcut: ' + (e.ctrlKey ? 'Ctrl+' : 'Cmd+') + e.key);
+    }
+  });
+  if (fsSupported && !document.fullscreenElement) showFsOverlay();
+}
+
+function showFsOverlay() {
+  if (fsOverlay || submitted) return;
+  fsOverlay = document.createElement('div'); fsOverlay.className = 'overlay';
+  fsOverlay.innerHTML = `<div class="modal center"><h3>Return to fullscreen</h3><p>The quiz must stay in fullscreen. Your timer is still running.</p><button class="btn block" id="fs-back">Go back to fullscreen</button></div>`;
+  document.body.appendChild(fsOverlay);
+  fsOverlay.querySelector('#fs-back').onclick = async () => {
+    try { await document.documentElement.requestFullscreen(); fsOverlay.remove(); fsOverlay = null; } catch { App.toast('Could not enter fullscreen. Press F11.'); }
+  };
+  const check = setInterval(() => { if (document.fullscreenElement || submitted) { fsOverlay?.remove(); fsOverlay = null; clearInterval(check); } }, 500);
+}
+</script>
+</body>
+</html>

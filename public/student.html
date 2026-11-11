@@ -1,0 +1,122 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>QuizHub - Student</title>
+<link rel="stylesheet" href="/css/style.css">
+</head>
+<body>
+<div id="top"></div>
+<div class="container">
+  <div class="tabs" id="tabs">
+    <button class="tab active" data-tab="quizzes">Available quizzes</button>
+    <button class="tab" data-tab="history">My results</button>
+    <button class="tab" data-tab="news">Announcements</button>
+  </div>
+  <div id="view"></div>
+</div>
+
+<script src="/js/common.js"></script>
+<script>
+const user = App.guard('student');
+const { esc, fmt } = App;
+document.getElementById('top').innerHTML = App.topbar(user, `<span class="muted small">Roll: ${esc(user.roll_no || '-')}</span>`);
+App.wireTopbar();
+const view = document.getElementById('view');
+let tab = 'quizzes';
+
+document.getElementById('tabs').onclick = (e) => {
+  const b = e.target.closest('.tab'); if (!b) return;
+  tab = b.dataset.tab;
+  document.querySelectorAll('.tab').forEach((t) => t.classList.toggle('active', t === b));
+  load();
+};
+
+const STATE = {
+  open: ['badge ok', 'Open'], in_progress: ['badge warn', 'In progress'], done: ['badge gray', 'Submitted'], upcoming: ['badge', 'Upcoming'], closed: ['badge bad', 'Closed'],
+};
+
+async function load() {
+  view.innerHTML = '<p class="muted">Loading...</p>';
+  try { await ({ quizzes: loadQuizzes, history: loadHistory, news: loadNews })[tab](); }
+  catch (e) { view.innerHTML = `<div class="alert err">${esc(e.message)}</div>`; }
+}
+
+async function loadQuizzes() {
+  const quizzes = await App.get('/api/student/quizzes');
+  if (!quizzes.length) { view.innerHTML = '<div class="card center muted">No quizzes have been published yet.</div>'; return; }
+  view.innerHTML = '<div class="grid cols-2" id="qgrid"></div>';
+  const grid = document.getElementById('qgrid');
+  for (const q of quizzes) {
+    const [cls, label] = STATE[q.state];
+    const el = document.createElement('div'); el.className = 'card';
+    el.innerHTML = `
+      <div class="row between"><h3 style="margin:0">${esc(q.title)}</h3><span class="${cls}">${label}</span></div>
+      <p class="muted small" style="margin:.2rem 0 .6rem">${esc(q.subject || 'General')} &middot; by ${esc(q.faculty)}</p>
+      ${q.description ? `<p>${esc(q.description)}</p>` : ''}
+      <p class="small muted" style="margin:.4rem 0">
+        ${q.question_count} questions &middot; ${q.total_marks} marks &middot; ${q.duration_min} min<br>
+        ${q.start_time ? 'Starts: ' + fmt(q.start_time) + '<br>' : ''}${q.end_time ? 'Closes: ' + fmt(q.end_time) + '<br>' : ''}
+        ${q.max_violations ? `Auto-submits after ${q.max_violations} rule violations` : ''}
+      </p>
+      ${q.state === 'done' && q.score !== null ? `<p><b>Score: ${q.score} / ${q.total}</b></p>` : ''}
+      <div class="row" id="act"></div>`;
+    const act = el.querySelector('#act');
+    if (q.state === 'open' || q.state === 'in_progress') {
+      const b = document.createElement('button'); b.className = 'btn'; b.textContent = q.state === 'in_progress' ? 'Resume quiz' : 'Start quiz';
+      b.onclick = () => beginQuiz(q); act.appendChild(b);
+    } else if (q.state === 'done') {
+      const a = document.createElement('a'); a.className = 'btn ghost'; a.href = `/quiz.html?attempt=${q.attempt_id}&view=result`; a.textContent = 'View result'; act.appendChild(a);
+    }
+    grid.appendChild(el);
+  }
+}
+
+function beginQuiz(q) {
+  if (q.state === 'in_progress') return start(q.id, '');
+  const m = App.modal(`
+    <h3>Before you start: ${esc(q.title)}</h3>
+    <div class="alert info"><b>Quiz rules</b>
+      <ul style="margin:.4rem 0 0;padding-left:1.2rem">
+        <li>The quiz runs in fullscreen. Do not leave it.</li>
+        <li>Switching tabs, switching windows, exiting fullscreen, closing or reloading the page, copy/paste and right-click are all <b>recorded as violations</b> and shown to your faculty.</li>
+        ${q.max_violations ? `<li>After <b>${q.max_violations}</b> violations your quiz is submitted automatically.</li>` : ''}
+        <li>You get one attempt. The timer keeps running even if you close the page.</li>
+      </ul></div>
+    ${q.needs_code ? '<label>Access code</label><input id="code" autocomplete="off">' : ''}
+    <label class="check"><input type="checkbox" id="agree"> I have read and accept these rules</label>
+    <div class="row" style="justify-content:flex-end;margin-top:12px"><button class="btn ghost" id="c">Cancel</button><button class="btn" id="go">Start now</button></div>`);
+  m.el.querySelector('#c').onclick = m.close;
+  m.el.querySelector('#go').onclick = async () => {
+    if (!m.el.querySelector('#agree').checked) return App.toast('Please accept the rules first');
+    const code = q.needs_code ? m.el.querySelector('#code').value : '';
+    try { await start(q.id, code, true); } catch (e) { App.toast(e.message); }
+  };
+}
+async function start(id, code) {
+  try {
+    const r = await App.post(`/api/student/quizzes/${id}/start`, { access_code: code });
+    location.href = `/quiz.html?attempt=${r.attempt_id}`;
+  } catch (e) { App.toast(e.message); throw e; }
+}
+
+async function loadHistory() {
+  const rows = await App.get('/api/student/history');
+  if (!rows.length) { view.innerHTML = '<div class="card center muted">You have not submitted any quizzes yet.</div>'; return; }
+  view.innerHTML = `<div class="table-wrap"><table><thead><tr><th>Quiz</th><th>Subject</th><th>Score</th><th>Status</th><th>Violations</th><th>Submitted</th><th></th></tr></thead><tbody>
+    ${rows.map((r) => `<tr><td>${esc(r.title)}</td><td>${esc(r.subject || '-')}</td><td>${r.score !== null ? `${r.score} / ${r.total}` : '<span class="muted">hidden</span>'}</td>
+      <td>${r.status === 'auto_submitted' ? '<span class="badge warn">Auto-submitted</span>' : '<span class="badge ok">Submitted</span>'}</td>
+      <td>${r.violations}</td><td>${fmt(r.submitted_at)}</td><td><a class="btn ghost sm" href="/quiz.html?attempt=${r.id}&view=result">Details</a></td></tr>`).join('')}
+    </tbody></table></div>`;
+}
+
+async function loadNews() {
+  const list = await App.get('/api/announcements');
+  view.innerHTML = list.length ? list.map((a) => `<div class="card" style="margin-bottom:12px"><h3>${esc(a.title)}</h3><p style="white-space:pre-wrap;margin:.3rem 0">${esc(a.body)}</p><p class="muted small" style="margin:0">${esc(a.author)} &middot; ${fmt(a.created_at)}</p></div>`).join('')
+    : '<div class="card center muted">No announcements.</div>';
+}
+load();
+</script>
+</body>
+</html>

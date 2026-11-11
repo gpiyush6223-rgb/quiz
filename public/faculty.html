@@ -1,0 +1,280 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>QuizHub - Faculty</title>
+<link rel="stylesheet" href="/css/style.css">
+</head>
+<body>
+<div id="top"></div>
+<div class="container">
+  <div class="tabs" id="tabs">
+    <button class="tab active" data-tab="quizzes">My quizzes</button>
+    <button class="tab" data-tab="news">Announcements</button>
+  </div>
+  <div id="view"></div>
+</div>
+
+<script src="/js/common.js"></script>
+<script>
+const user = App.guard('faculty');
+const { esc, fmt, api } = App;
+document.getElementById('top').innerHTML = App.topbar(user);
+App.wireTopbar();
+const view = document.getElementById('view');
+let liveTimer = null;
+const stopLive = () => { clearInterval(liveTimer); liveTimer = null; };
+
+document.getElementById('tabs').onclick = (e) => {
+  const b = e.target.closest('.tab'); if (!b) return;
+  document.querySelectorAll('.tab').forEach((t) => t.classList.toggle('active', t === b));
+  b.dataset.tab === 'quizzes' ? listQuizzes() : news();
+};
+
+// =====================================================================  QUIZ LIST
+async function listQuizzes() {
+  stopLive();
+  view.innerHTML = '<p class="muted">Loading...</p>';
+  const quizzes = await App.get('/api/faculty/quizzes');
+  view.innerHTML = `<div class="row between" style="margin-bottom:14px"><h2 style="margin:0">My quizzes</h2><button class="btn" id="new">+ New quiz</button></div>
+    ${quizzes.length ? '<div class="grid cols-2" id="grid"></div>' : '<div class="card center muted">No quizzes yet. Create your first one.</div>'}`;
+  document.getElementById('new').onclick = () => quizForm();
+  const grid = document.getElementById('grid'); if (!grid) return;
+  for (const q of quizzes) {
+    const el = document.createElement('div'); el.className = 'card';
+    el.innerHTML = `<div class="row between"><h3 style="margin:0">${esc(q.title)}</h3><span class="badge ${q.published ? 'ok' : 'gray'}">${q.published ? 'Published' : 'Draft'}</span></div>
+      <p class="muted small" style="margin:.2rem 0 .6rem">${esc(q.subject || 'General')} &middot; ${q.duration_min} min &middot; ${q.question_count} questions</p>
+      <div class="row small" style="margin-bottom:12px"><span class="badge">${q.submissions} submitted</span>${q.in_progress ? `<span class="badge warn">${q.in_progress} live</span>` : ''}<span class="flag ${q.total_violations ? 'medium' : 'clean'}">${q.total_violations} flags</span></div>
+      <div class="row"><button class="btn sm" data-a="open">Questions &amp; settings</button><button class="btn sm ghost" data-a="results">Results</button>
+      <button class="btn sm ghost" data-a="pub">${q.published ? 'Unpublish' : 'Publish'}</button><button class="btn sm ghost" data-a="dup">Duplicate</button><button class="btn sm danger ghost" data-a="del">Delete</button></div>`;
+    el.onclick = async (e) => {
+      const a = e.target.dataset.a; if (!a) return;
+      try {
+        if (a === 'open') quizDetail(q.id);
+        if (a === 'results') results(q.id);
+        if (a === 'pub') { await App.post(`/api/faculty/quizzes/${q.id}/publish`, { published: !q.published }); App.toast(q.published ? 'Unpublished' : 'Published - students can see it now'); listQuizzes(); }
+        if (a === 'dup') { await App.post(`/api/faculty/quizzes/${q.id}/duplicate`); App.toast('Duplicated as a draft'); listQuizzes(); }
+        if (a === 'del' && await App.confirmBox(`Delete "${q.title}" and all of its results? This cannot be undone.`, 'Delete')) { await App.del(`/api/faculty/quizzes/${q.id}`); listQuizzes(); }
+      } catch (err) { App.toast(err.message); }
+    };
+    grid.appendChild(el);
+  }
+}
+
+// =====================================================================  QUIZ FORM
+function quizForm(existing, after) {
+  const q = existing || { title: '', subject: '', description: '', duration_min: 30, max_violations: 5, negative_marking: 0, pass_percent: 40, access_code: '', shuffle_questions: 0, shuffle_options: 0, show_result: 1 };
+  const m = App.modal(`<h3>${existing ? 'Quiz settings' : 'New quiz'}</h3>
+    <div class="form-grid">
+      <div><label>Title</label><input id="f-title" value="${esc(q.title)}"></div>
+      <div><label>Subject</label><input id="f-subject" value="${esc(q.subject)}"></div>
+      <div><label>Duration (minutes)</label><input id="f-dur" type="number" min="1" value="${q.duration_min}"></div>
+      <div><label>Pass percentage</label><input id="f-pass" type="number" min="0" max="100" value="${q.pass_percent}"></div>
+      <div><label>Opens at <span class="muted">(optional)</span></label><input id="f-start" type="datetime-local" value="${App.toLocalInput(q.start_time)}"></div>
+      <div><label>Closes at <span class="muted">(optional)</span></label><input id="f-end" type="datetime-local" value="${App.toLocalInput(q.end_time)}"></div>
+      <div><label>Auto-submit after N violations <span class="muted">(0 = never)</span></label><input id="f-max" type="number" min="0" value="${q.max_violations}"></div>
+      <div><label>Negative marking <span class="muted">(0 - 1 of marks)</span></label><input id="f-neg" type="number" min="0" max="1" step="0.05" value="${q.negative_marking}"></div>
+      <div><label>Access code <span class="muted">(optional)</span></label><input id="f-code" value="${esc(q.access_code)}"></div>
+    </div>
+    <label>Description / instructions</label><textarea id="f-desc">${esc(q.description)}</textarea>
+    <label class="check"><input type="checkbox" id="f-sq" ${q.shuffle_questions ? 'checked' : ''}> Shuffle question order for each student</label>
+    <label class="check"><input type="checkbox" id="f-so" ${q.shuffle_options ? 'checked' : ''}> Shuffle answer options</label>
+    <label class="check"><input type="checkbox" id="f-sr" ${q.show_result ? 'checked' : ''}> Show score and answers to students after they submit</label>
+    <div class="row" style="justify-content:flex-end;margin-top:14px"><button class="btn ghost" id="x">Cancel</button><button class="btn" id="ok">${existing ? 'Save' : 'Create quiz'}</button></div>`, { wide: true });
+  const v = (id) => m.el.querySelector(id);
+  v('#x').onclick = m.close;
+  v('#ok').onclick = async () => {
+    const body = { title: v('#f-title').value, subject: v('#f-subject').value, description: v('#f-desc').value, duration_min: v('#f-dur').value, pass_percent: v('#f-pass').value,
+      start_time: App.fromLocalInput(v('#f-start').value), end_time: App.fromLocalInput(v('#f-end').value), max_violations: v('#f-max').value, negative_marking: v('#f-neg').value,
+      access_code: v('#f-code').value, shuffle_questions: v('#f-sq').checked, shuffle_options: v('#f-so').checked, show_result: v('#f-sr').checked };
+    try {
+      if (existing) { await App.put(`/api/faculty/quizzes/${existing.id}`, body); m.close(); App.toast('Saved'); after && after(); }
+      else { const r = await App.post('/api/faculty/quizzes', body); m.close(); quizDetail(r.id); }
+    } catch (e) { App.toast(e.message); }
+  };
+}
+
+// =====================================================================  QUIZ DETAIL (questions)
+async function quizDetail(id) {
+  stopLive();
+  const { quiz, questions } = await App.get(`/api/faculty/quizzes/${id}`);
+  const total = questions.reduce((s, q) => s + q.marks, 0);
+  view.innerHTML = `<p><a href="#" id="back">&larr; All quizzes</a></p>
+    <div class="card"><div class="row between"><div><h2 style="margin:0">${esc(quiz.title)}</h2>
+      <p class="muted small" style="margin:.2rem 0 0">${quiz.duration_min} min &middot; ${questions.length} questions &middot; ${total} marks &middot; ${quiz.max_violations ? 'auto-submit at ' + quiz.max_violations + ' violations' : 'no auto-submit'}${quiz.access_code ? ' &middot; code: <b>' + esc(quiz.access_code) + '</b>' : ''}</p></div>
+      <div class="row"><span class="badge ${quiz.published ? 'ok' : 'gray'}">${quiz.published ? 'Published' : 'Draft'}</span><button class="btn sm ghost" id="settings">Settings</button><button class="btn sm ghost" id="results">Results</button></div></div></div>
+    <div class="row between" style="margin:18px 0 10px"><h3 style="margin:0">Questions</h3>
+      <div class="row"><button class="btn sm ghost" id="bulk">Bulk upload</button><button class="btn sm" id="add">+ Add question</button></div></div>
+    <div id="qlist">${questions.length ? '' : '<div class="card center muted">No questions yet.</div>'}</div>`;
+  document.getElementById('back').onclick = (e) => { e.preventDefault(); listQuizzes(); };
+  document.getElementById('settings').onclick = () => quizForm(quiz, () => quizDetail(id));
+  document.getElementById('results').onclick = () => results(id);
+  document.getElementById('add').onclick = () => questionForm(id, null, () => quizDetail(id));
+  document.getElementById('bulk').onclick = () => bulkForm(id, () => quizDetail(id));
+  const list = document.getElementById('qlist');
+  questions.forEach((q, i) => {
+    const ans = q.type === 'text' ? q.correct.join(' / ') : q.correct.map((x) => q.options[x]).join(', ');
+    const el = document.createElement('div'); el.className = 'q-item';
+    el.innerHTML = `<div class="row between"><b>Q${i + 1}. ${esc(q.text)}</b><span class="badge">${q.marks} mark${q.marks === 1 ? '' : 's'} &middot; ${q.type}</span></div>
+      ${q.options.length ? `<ul style="margin:.4rem 0;padding-left:1.2rem">${q.options.map((o, k) => `<li class="${q.correct.includes(k) ? 'ans-ok' : ''}">${esc(o)}</li>`).join('')}</ul>` : ''}
+      <p class="small muted" style="margin:.3rem 0">Answer: <span class="ans-ok">${esc(ans)}</span></p>
+      <div class="row"><button class="btn sm ghost" data-a="edit">Edit</button><button class="btn sm danger ghost" data-a="del">Delete</button></div>`;
+    el.onclick = async (e) => {
+      const a = e.target.dataset.a;
+      if (a === 'edit') questionForm(id, q, () => quizDetail(id));
+      if (a === 'del' && await App.confirmBox('Delete this question?', 'Delete')) { try { await App.del(`/api/faculty/questions/${q.id}`); quizDetail(id); } catch (err) { App.toast(err.message); } }
+    };
+    list.appendChild(el);
+  });
+}
+
+// =====================================================================  QUESTION FORM
+function questionForm(quizId, q, after) {
+  q = q || { text: '', type: 'single', options: ['', '', '', ''], correct: [0], marks: 1, explanation: '' };
+  const m = App.modal(`<h3>${q.id ? 'Edit question' : 'Add question'}</h3>
+    <label>Question</label><textarea id="q-text">${esc(q.text)}</textarea>
+    <div class="form-grid"><div><label>Type</label><select id="q-type">
+      <option value="single">Single choice (MCQ)</option><option value="multiple">Multiple correct</option><option value="truefalse">True / False</option><option value="text">Short text answer</option></select></div>
+      <div><label>Marks</label><input id="q-marks" type="number" min="0.5" step="0.5" value="${q.marks}"></div></div>
+    <div id="q-body"></div>
+    <label>Explanation <span class="muted">(shown to students after submit, optional)</span></label><input id="q-exp" value="${esc(q.explanation)}">
+    <div class="row" style="justify-content:flex-end;margin-top:14px"><button class="btn ghost" id="x">Cancel</button><button class="btn" id="ok">Save</button></div>`, { wide: true });
+  const v = (s) => m.el.querySelector(s);
+  v('#q-type').value = q.type;
+  let opts = q.options.length ? [...q.options] : ['', '', '', ''];
+  let corr = [...q.correct];
+
+  function drawBody() {
+    const type = v('#q-type').value, body = v('#q-body');
+    if (type === 'text') { body.innerHTML = `<label>Accepted answers <span class="muted">(one per line, not case-sensitive)</span></label><textarea id="q-acc">${esc(type === q.type ? q.correct.join('\n') : '')}</textarea>`; return; }
+    if (type === 'truefalse') {
+      const c = corr[0] === 1 ? 1 : 0;
+      body.innerHTML = `<label>Correct answer</label><label class="check"><input type="radio" name="tf" value="0" ${c === 0 ? 'checked' : ''}> True</label><label class="check"><input type="radio" name="tf" value="1" ${c === 1 ? 'checked' : ''}> False</label>`; return;
+    }
+    const kind = type === 'multiple' ? 'checkbox' : 'radio';
+    body.innerHTML = `<label>Options <span class="muted">(tick the correct ${type === 'multiple' ? 'ones' : 'one'})</span></label>
+      ${opts.map((o, i) => `<div class="row" style="margin-bottom:6px;flex-wrap:nowrap"><input type="${kind}" name="co" value="${i}" ${corr.includes(i) ? 'checked' : ''}><input class="opt-in" data-i="${i}" value="${esc(o)}" placeholder="Option ${i + 1}"><button class="btn sm danger ghost" data-rm="${i}" ${opts.length <= 2 ? 'disabled' : ''}>x</button></div>`).join('')}
+      <button class="btn sm ghost" id="addopt" ${opts.length >= 8 ? 'disabled' : ''}>+ Add option</button>`;
+    body.querySelectorAll('.opt-in').forEach((el) => (el.oninput = () => (opts[el.dataset.i] = el.value)));
+    body.querySelectorAll('input[name=co]').forEach((el) => (el.onchange = () => { corr = [...body.querySelectorAll('input[name=co]:checked')].map((x) => Number(x.value)); }));
+    body.querySelectorAll('[data-rm]').forEach((b) => (b.onclick = () => { const i = Number(b.dataset.rm); opts.splice(i, 1); corr = corr.filter((c) => c !== i).map((c) => (c > i ? c - 1 : c)); drawBody(); }));
+    const add = body.querySelector('#addopt'); if (add) add.onclick = () => { opts.push(''); drawBody(); };
+  }
+  v('#q-type').onchange = () => { corr = v('#q-type').value === 'multiple' ? corr : corr.slice(0, 1); if (!corr.length) corr = [0]; drawBody(); };
+  drawBody();
+  v('#x').onclick = m.close;
+  v('#ok').onclick = async () => {
+    const type = v('#q-type').value;
+    const body = { text: v('#q-text').value, type, marks: v('#q-marks').value, explanation: v('#q-exp').value };
+    if (type === 'text') body.correct = v('#q-acc').value.split('\n');
+    else if (type === 'truefalse') body.correct = [Number(v('input[name=tf]:checked').value)];
+    else { body.options = opts; body.correct = corr; }
+    try { q.id ? await App.put(`/api/faculty/questions/${q.id}`, body) : await App.post(`/api/faculty/quizzes/${quizId}/questions`, body); m.close(); after(); }
+    catch (e) { App.toast(e.message); }
+  };
+}
+
+// =====================================================================  BULK UPLOAD
+function bulkForm(quizId, after) {
+  const sample = `question,type,option1,option2,option3,option4,correct,marks,explanation
+"What is 2+2?",single,3,4,5,6,B,1,Basic addition
+"Which are prime?",multiple,2,4,5,9,A;C,2,
+"The sky is blue",truefalse,,,,,True,1,
+"Capital of France?",text,,,,,Paris,1,`;
+  const m = App.modal(`<h3>Bulk upload questions</h3>
+    <p class="small muted">Upload a CSV file or paste CSV text. Columns: <code>question, type, option1-4, correct, marks, explanation</code>. For <b>correct</b> use a letter/number (A or 1) - separate several with <code>;</code>. For text questions list accepted answers separated by <code>;</code>. Types: single, multiple, truefalse, text.</p>
+    <input type="file" id="file" accept=".csv,.txt,.json">
+    <label>or paste here</label><textarea id="data" style="min-height:140px;font-family:monospace;font-size:.82rem" placeholder="${esc(sample)}"></textarea>
+    <div class="row between" style="margin-top:12px"><button class="btn sm ghost" id="sample">Download sample CSV</button>
+    <div class="row"><button class="btn ghost" id="x">Cancel</button><button class="btn" id="ok">Upload</button></div></div>`, { wide: true });
+  const v = (s) => m.el.querySelector(s);
+  v('#file').onchange = async (e) => { const f = e.target.files[0]; if (f) v('#data').value = await f.text(); };
+  v('#sample').onclick = () => { const a = document.createElement('a'); a.href = URL.createObjectURL(new Blob([sample], { type: 'text/csv' })); a.download = 'sample_questions.csv'; a.click(); };
+  v('#x').onclick = m.close;
+  v('#ok').onclick = async () => {
+    const data = v('#data').value.trim(); if (!data) return App.toast('Nothing to upload');
+    const format = data.startsWith('[') ? 'json' : 'csv';
+    try { const r = await App.post(`/api/faculty/quizzes/${quizId}/questions/bulk`, { format, data }); m.close(); App.toast(`${r.added} questions added`); after(); }
+    catch (e) { App.toast(e.message, 5000); }
+  };
+}
+
+// =====================================================================  RESULTS + FLAGS
+async function results(id) {
+  stopLive();
+  const draw = async () => {
+    let r, a;
+    try { [r, a] = await Promise.all([App.get(`/api/faculty/quizzes/${id}/results`), App.get(`/api/faculty/quizzes/${id}/analytics`)]); } catch (e) { return App.toast(e.message); }
+    const scroll = window.scrollY;
+    const statusBadge = (x) => x.status === 'in_progress' ? '<span class="badge warn">Live</span>' : x.status === 'auto_submitted' ? `<span class="badge bad" title="${esc(x.submit_reason)}">Auto-submitted</span>` : '<span class="badge ok">Submitted</span>';
+    view.innerHTML = `<p><a href="#" id="back">&larr; Back</a></p>
+      <div class="row between"><h2 style="margin:0">${esc(r.quiz.title)} - results</h2>
+        <div class="row"><label class="check" style="margin:0"><input type="checkbox" id="live" ${liveTimer ? 'checked' : ''}> Live refresh</label><button class="btn sm ghost" id="csv">Export CSV</button></div></div>
+      <div class="grid stats" style="margin:14px 0">
+        <div class="stat"><b>${a.submissions}</b><span>Submitted</span></div><div class="stat"><b>${a.avg_percent}%</b><span>Average score</span></div>
+        <div class="stat"><b>${a.pass_rate}%</b><span>Pass rate</span></div><div class="stat"><b>${a.highest}% / ${a.lowest}%</b><span>Highest / lowest</span></div>
+        <div class="stat ${a.flagged ? 'alert' : ''}"><b>${a.flagged}</b><span>Students flagged</span></div><div class="stat ${a.auto_submitted ? 'alert' : ''}"><b>${a.auto_submitted}</b><span>Auto-submitted</span></div></div>
+      <div class="table-wrap"><table><thead><tr><th>Student</th><th>Roll no</th><th>Status</th><th>Score</th><th>%</th><th>Violations</th><th>Time taken</th><th>Submitted</th><th></th></tr></thead><tbody>
+      ${r.rows.length ? r.rows.map((x) => `<tr><td>${esc(x.name)}</td><td>${esc(x.roll_no || '-')}</td><td>${statusBadge(x)}</td><td>${x.score !== null ? x.score + ' / ' + x.total : '-'}</td><td>${x.percent !== null ? x.percent + '%' : '-'}</td>
+        <td><span class="flag ${x.flag}">${x.violations ? '&#9873; ' : ''}${x.violations}</span></td><td>${App.fmtDur(x.seconds_taken)}</td><td>${fmt(x.submitted_at)}</td><td><button class="btn sm ghost" data-id="${x.attempt_id}">Open</button></td></tr>`).join('')
+        : '<tr><td colspan="9" class="center muted">No one has started this quiz yet.</td></tr>'}
+      </tbody></table></div>
+      ${a.submissions ? `<div class="grid cols-2" style="margin-top:18px">
+        <div class="card"><h3>Score distribution</h3><div class="hist" style="margin-top:22px">${a.buckets.map((n, i) => `<div style="height:${Math.max(2, (n / Math.max(1, ...a.buckets)) * 100)}%"><span>${n}</span></div>`).join('')}</div>
+          <div class="row between small muted"><span>0%</span><span>50%</span><span>100%</span></div></div>
+        <div class="card"><h3>Question difficulty <span class="muted small">(% correct)</span></h3>${a.per_question.map((p, i) => { const pc = Math.round(p.correct / a.submissions * 100); return `<div class="small" style="margin:6px 0"><div class="row between"><span>Q${i + 1}</span><span>${pc}%</span></div><div class="bar"><i style="width:${pc}%"></i></div></div>`; }).join('')}</div></div>` : ''}`;
+    window.scrollTo(0, scroll);
+    document.getElementById('back').onclick = (e) => { e.preventDefault(); stopLive(); listQuizzes(); };
+    document.getElementById('csv').onclick = () => App.downloadCSV(`/api/faculty/quizzes/${id}/export`, 'results.csv').catch((e) => App.toast(e.message));
+    document.getElementById('live').onchange = (e) => { stopLive(); if (e.target.checked) liveTimer = setInterval(draw, 8000); };
+    view.querySelectorAll('button[data-id]').forEach((b) => (b.onclick = () => attemptDetail(b.dataset.id, draw)));
+  };
+  await draw();
+}
+
+async function attemptDetail(id, refresh) {
+  let d; try { d = await App.get(`/api/faculty/attempts/${id}`); } catch (e) { return App.toast(e.message); }
+  const at = d.attempt;
+  const counts = {}; d.violations.forEach((v) => (counts[v.type] = (counts[v.type] || 0) + 1));
+  const fmtAns = (q, v) => v === null || v === undefined ? '<i class="muted">not answered</i>' : q.type === 'text' ? esc(v) : (Array.isArray(v) ? v : [v]).map((x) => esc(q.options[x])).join(', ');
+  const m = App.modal(`<div class="row between"><div><h3 style="margin:0">${esc(d.student.name)} <span class="muted small">${esc(d.student.roll_no || '')}</span></h3><p class="muted small" style="margin:0">${esc(d.student.email)}</p></div>
+      <span class="flag ${at.violations ? (at.violations >= d.quiz.max_violations && d.quiz.max_violations ? 'high' : 'medium') : 'clean'}">&#9873; ${at.violations} violation${at.violations === 1 ? '' : 's'}</span></div>
+    <div class="row small" style="margin:10px 0"><span class="badge">${at.status.replace('_', ' ')}${at.submit_reason ? ' (' + esc(at.submit_reason.replace('_', ' ')) + ')' : ''}</span><span>Score: <b>${at.score ?? '-'} / ${at.total ?? '-'}</b></span><span class="muted">Started ${fmt(at.started_at)}${at.submitted_at ? ' - submitted ' + fmt(at.submitted_at) : ''}</span></div>
+    <h3>Violation log</h3>
+    ${d.violations.length ? `<div class="row small" style="margin-bottom:6px">${Object.entries(counts).map(([t, n]) => `<span class="badge warn">${esc(App.VIOLATION_LABELS[t] || t)} x${n}</span>`).join('')}</div>
+      <ul class="timeline small">${d.violations.map((v) => `<li><span class="muted" style="min-width:150px">${fmt(v.created_at)}</span><span>${esc(App.VIOLATION_LABELS[v.type] || v.type)}${v.detail ? ' <span class="muted">- ' + esc(v.detail) + '</span>' : ''}</span></li>`).join('')}</ul>` : '<p class="muted small">Clean attempt - no violations recorded.</p>'}
+    <h3 style="margin-top:14px">Answers</h3>
+    ${d.review.map((q, i) => `<div class="q-item"><div class="row between"><b>Q${i + 1}. ${esc(q.text)}</b><span class="badge ${q.status === 'correct' ? 'ok' : q.status === 'wrong' ? 'bad' : 'gray'}">${+q.awarded.toFixed(2)} / ${q.marks}</span></div>
+      <p class="small" style="margin:.3rem 0">Student: <span class="${q.status === 'correct' ? 'ans-ok' : q.status === 'wrong' ? 'ans-bad' : ''}">${fmtAns(q, q.your_answer)}</span></p>
+      ${q.status !== 'correct' ? `<p class="small" style="margin:.2rem 0">Correct: <span class="ans-ok">${q.type === 'text' ? q.correct.map(esc).join(' / ') : q.correct.map((x) => esc(q.options[x])).join(', ')}</span></p>` : ''}</div>`).join('')}
+    <div class="row between" style="margin-top:14px"><div class="row">
+      ${at.status === 'in_progress' ? '<button class="btn sm ghost" id="force">Force submit</button>' : '<button class="btn sm ghost" id="adjust">Adjust marks</button>'}
+      <button class="btn sm danger ghost" id="reset">Allow retake</button></div><button class="btn" id="close">Close</button></div>`, { wide: true });
+  const v = (s) => m.el.querySelector(s);
+  v('#close').onclick = m.close;
+  v('#reset').onclick = async () => { if (await App.confirmBox('Delete this attempt so the student can take the quiz again?', 'Allow retake')) { try { await App.post(`/api/faculty/attempts/${id}/reset`); m.close(); refresh(); } catch (e) { App.toast(e.message); } } };
+  if (v('#force')) v('#force').onclick = async () => { try { await App.post(`/api/faculty/attempts/${id}/force-submit`); m.close(); refresh(); } catch (e) { App.toast(e.message); } };
+  if (v('#adjust')) v('#adjust').onclick = async () => {
+    const val = prompt('Add or subtract marks (e.g. 2 or -1.5). Current adjustment: ' + at.manual_adjust, at.manual_adjust);
+    if (val === null) return;
+    try { await App.post(`/api/faculty/attempts/${id}/adjust`, { adjust: val }); m.close(); refresh(); App.toast('Marks updated'); } catch (e) { App.toast(e.message); }
+  };
+}
+
+// =====================================================================  ANNOUNCEMENTS
+async function news() {
+  stopLive();
+  const list = await App.get('/api/announcements');
+  view.innerHTML = `<div class="card" style="margin-bottom:16px"><h3>Post an announcement</h3><label>Title</label><input id="a-t"><label>Message</label><textarea id="a-b"></textarea>
+    <button class="btn" id="a-go" style="margin-top:10px">Post to all students</button></div>
+    ${list.map((a) => `<div class="card" style="margin-bottom:12px"><div class="row between"><h3 style="margin:0">${esc(a.title)}</h3>${a.author_id === user.id ? `<button class="btn sm danger ghost" data-del="${a.id}">Delete</button>` : ''}</div>
+      <p style="white-space:pre-wrap;margin:.3rem 0">${esc(a.body)}</p><p class="muted small" style="margin:0">${esc(a.author)} &middot; ${fmt(a.created_at)}</p></div>`).join('')}`;
+  document.getElementById('a-go').onclick = async () => { try { await App.post('/api/announcements', { title: document.getElementById('a-t').value, body: document.getElementById('a-b').value }); news(); } catch (e) { App.toast(e.message); } };
+  view.querySelectorAll('[data-del]').forEach((b) => (b.onclick = async () => { await App.del(`/api/announcements/${b.dataset.del}`); news(); }));
+}
+
+listQuizzes();
+</script>
+</body>
+</html>

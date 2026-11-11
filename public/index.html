@@ -1,1 +1,92 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>QuizHub - Login</title>
+<link rel="stylesheet" href="/css/style.css">
+</head>
+<body>
+<div class="auth-wrap">
+  <div class="auth-card card">
+    <div class="center">
+      <div class="brand" style="font-size:1.5rem">Quiz<span>Hub</span></div>
+      <p class="muted" style="margin:.2rem 0 0">Online quizzes &amp; assignments</p>
+    </div>
 
+    <div class="role-pills" id="pills">
+      <button class="pill active" data-role="student">Student</button>
+      <button class="pill" data-role="faculty">Faculty</button>
+      <button class="pill" data-role="admin">Admin</button>
+    </div>
+
+    <div id="msg"></div>
+
+    <form id="form" autocomplete="on">
+      <div id="reg-only" class="hidden">
+        <label for="name">Full name</label><input id="name" autocomplete="name">
+        <div id="student-fields">
+          <label for="roll">Roll number</label><input id="roll">
+        </div>
+        <label for="dept">Department / class <span class="muted">(optional)</span></label><input id="dept">
+      </div>
+      <label for="email">Email</label><input id="email" type="email" required autocomplete="username">
+      <label for="password">Password</label><input id="password" type="password" required autocomplete="current-password">
+      <button class="btn block" style="margin-top:18px" id="submit">Log in</button>
+    </form>
+
+    <p class="center small" id="toggle-wrap" style="margin-bottom:0">
+      <span id="toggle-text">New here?</span> <a href="#" id="toggle">Create an account</a>
+    </p>
+    <p class="center small muted hidden" id="admin-hint">Default admin: admin@quiz.com / admin123 (change it after first login)</p>
+  </div>
+</div>
+
+<script src="/js/common.js"></script>
+<script>
+let role = 'student', mode = 'login';
+const $ = (id) => document.getElementById(id);
+
+// already logged in? go straight to the right page
+const existing = App.getUser();
+if (existing && App.getToken()) location.href = '/' + existing.role + '.html';
+
+function show(type, text) { $('msg').innerHTML = text ? `<div class="alert ${type}">${App.esc(text)}</div>` : ''; }
+
+function refresh() {
+  document.querySelectorAll('.pill').forEach((p) => p.classList.toggle('active', p.dataset.role === role));
+  const reg = mode === 'register';
+  $('reg-only').classList.toggle('hidden', !reg);
+  $('student-fields').classList.toggle('hidden', role !== 'student');
+  $('toggle-wrap').classList.toggle('hidden', role === 'admin');
+  $('admin-hint').classList.toggle('hidden', role !== 'admin');
+  $('submit').textContent = reg ? `Create ${role} account` : `Log in as ${role}`;
+  $('toggle-text').textContent = reg ? 'Already have an account?' : 'New here?';
+  $('toggle').textContent = reg ? 'Log in' : 'Create an account';
+  $('password').autocomplete = reg ? 'new-password' : 'current-password';
+  show('', '');
+  if (reg && role === 'faculty') show('info', 'Faculty accounts need admin approval before you can log in.');
+}
+
+$('pills').onclick = (e) => { const b = e.target.closest('.pill'); if (!b) return; role = b.dataset.role; if (role === 'admin') mode = 'login'; refresh(); };
+$('toggle').onclick = (e) => { e.preventDefault(); mode = mode === 'login' ? 'register' : 'login'; refresh(); };
+
+$('form').onsubmit = async (e) => {
+  e.preventDefault();
+  $('submit').disabled = true; show('', '');
+  try {
+    if (mode === 'register') {
+      const r = await App.post('/api/auth/register', { name: $('name').value, email: $('email').value, password: $('password').value, role, roll_no: $('roll').value, department: $('dept').value });
+      mode = 'login'; refresh(); show('ok', r.message);
+    } else {
+      const r = await App.post('/api/auth/login', { email: $('email').value, password: $('password').value, role });
+      App.setSession(r.token, r.user);
+      location.href = '/' + r.user.role + '.html';
+    }
+  } catch (err) { show('err', err.message); }
+  $('submit').disabled = false;
+};
+refresh();
+</script>
+</body>
+</html>

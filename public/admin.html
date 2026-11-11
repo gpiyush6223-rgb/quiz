@@ -1,0 +1,133 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>QuizHub - Admin</title>
+<link rel="stylesheet" href="/css/style.css">
+</head>
+<body>
+<div id="top"></div>
+<div class="container">
+  <div class="tabs" id="tabs">
+    <button class="tab active" data-tab="overview">Overview</button>
+    <button class="tab" data-tab="users">Users</button>
+    <button class="tab" data-tab="quizzes">All quizzes</button>
+    <button class="tab" data-tab="flags">Flagged attempts</button>
+    <button class="tab" data-tab="news">Announcements</button>
+    <button class="tab" data-tab="audit">Activity log</button>
+  </div>
+  <div id="view"></div>
+</div>
+
+<script src="/js/common.js"></script>
+<script>
+const user = App.guard('admin');
+const { esc, fmt } = App;
+document.getElementById('top').innerHTML = App.topbar(user);
+App.wireTopbar();
+const view = document.getElementById('view');
+let userFilter = '';
+
+const tabs = { overview, users, quizzes, flags, news, audit };
+document.getElementById('tabs').onclick = (e) => {
+  const b = e.target.closest('.tab'); if (!b) return;
+  document.querySelectorAll('.tab').forEach((t) => t.classList.toggle('active', t === b));
+  run(b.dataset.tab);
+};
+async function run(name) {
+  view.innerHTML = '<p class="muted">Loading...</p>';
+  try { await tabs[name](); } catch (e) { view.innerHTML = `<div class="alert err">${esc(e.message)}</div>`; }
+}
+
+async function overview() {
+  const s = await App.get('/api/admin/stats');
+  const stat = (n, label, alert) => `<div class="stat ${alert && n ? 'alert' : ''}"><b>${n}</b><span>${label}</span></div>`;
+  view.innerHTML = `<div class="grid stats">
+    ${stat(s.students, 'Students')}${stat(s.faculty, 'Active faculty')}${stat(s.pending_faculty, 'Faculty awaiting approval', true)}${stat(s.blocked, 'Blocked users')}
+    ${stat(s.quizzes, 'Quizzes')}${stat(s.published, 'Published')}${stat(s.attempts, 'Submissions')}${stat(s.live, 'Live right now')}
+    ${stat(s.flagged, 'Flagged attempts', true)}${stat(s.total_violations, 'Total violations', true)}${stat(s.auto_submitted, 'Auto-submitted for cheating', true)}</div>
+    ${s.pending_faculty ? `<div class="alert info" style="margin-top:16px">${s.pending_faculty} faculty account(s) are waiting for approval. <a href="#" id="go-users">Review now</a></div>` : ''}`;
+  const g = document.getElementById('go-users'); if (g) g.onclick = (e) => { e.preventDefault(); userFilter = 'faculty'; document.querySelector('[data-tab=users]').click(); };
+}
+
+async function users() {
+  const list = await App.get('/api/admin/users' + (userFilter ? '?role=' + userFilter : ''));
+  const stBadge = { active: 'ok', pending: 'warn', blocked: 'bad' };
+  view.innerHTML = `<div class="row between" style="margin-bottom:12px"><div class="row"><select id="rf" style="width:auto"><option value="">All roles</option><option value="student">Students</option><option value="faculty">Faculty</option><option value="admin">Admins</option></select></div>
+    <div class="row"><button class="btn sm ghost" id="bulk">Import CSV</button><button class="btn sm" id="add">+ Add user</button></div></div>
+    <div class="table-wrap"><table><thead><tr><th>Name</th><th>Email</th><th>Role</th><th>Roll / Dept</th><th>Status</th><th>Joined</th><th></th></tr></thead><tbody>
+    ${list.map((u) => `<tr><td>${esc(u.name)}</td><td>${esc(u.email)}</td><td>${u.role}</td><td>${esc([u.roll_no, u.department].filter(Boolean).join(' / ') || '-')}</td><td><span class="badge ${stBadge[u.status]}">${u.status}</span></td><td>${fmt(u.created_at)}</td>
+      <td class="right">${u.id === user.id ? '<span class="muted small">you</span>' : `
+        ${u.status !== 'active' ? `<button class="btn sm" data-a="active" data-id="${u.id}">${u.status === 'pending' ? 'Approve' : 'Unblock'}</button>` : `<button class="btn sm ghost" data-a="blocked" data-id="${u.id}">Block</button>`}
+        <button class="btn sm ghost" data-a="pw" data-id="${u.id}">Reset password</button><button class="btn sm danger ghost" data-a="del" data-id="${u.id}" data-name="${esc(u.name)}">Delete</button>`}</td></tr>`).join('')}
+    </tbody></table></div>`;
+  document.getElementById('rf').value = userFilter;
+  document.getElementById('rf').onchange = (e) => { userFilter = e.target.value; users(); };
+  document.getElementById('add').onclick = addUser;
+  document.getElementById('bulk').onclick = bulkUsers;
+  view.querySelectorAll('button[data-a]').forEach((b) => (b.onclick = async () => {
+    const id = b.dataset.id, a = b.dataset.a;
+    try {
+      if (a === 'active' || a === 'blocked') await App.patch(`/api/admin/users/${id}`, { status: a });
+      if (a === 'pw') { const pw = prompt('New password for this user (min 6 characters):'); if (!pw) return; await App.post(`/api/admin/users/${id}/reset-password`, { password: pw }); App.toast('Password reset'); return; }
+      if (a === 'del') { if (!(await App.confirmBox(`Delete ${b.dataset.name}? Their quiz attempts or quizzes will be deleted too.`, 'Delete'))) return; await App.del(`/api/admin/users/${id}`); }
+      users();
+    } catch (e) { App.toast(e.message); }
+  }));
+}
+
+function addUser() {
+  const m = App.modal(`<h3>Add user</h3><div class="form-grid"><div><label>Name</label><input id="n"></div><div><label>Role</label><select id="r"><option value="student">Student</option><option value="faculty">Faculty</option><option value="admin">Admin</option></select></div>
+    <div><label>Email</label><input id="e" type="email"></div><div><label>Password</label><input id="p" type="text"></div><div><label>Roll number</label><input id="ro"></div><div><label>Department</label><input id="d"></div></div>
+    <div class="row" style="justify-content:flex-end;margin-top:14px"><button class="btn ghost" id="x">Cancel</button><button class="btn" id="ok">Create</button></div>`);
+  const v = (s) => m.el.querySelector(s);
+  v('#x').onclick = m.close;
+  v('#ok').onclick = async () => { try { await App.post('/api/admin/users', { name: v('#n').value, email: v('#e').value, role: v('#r').value, password: v('#p').value, roll_no: v('#ro').value, department: v('#d').value }); m.close(); users(); } catch (e) { App.toast(e.message); } };
+}
+function bulkUsers() {
+  const m = App.modal(`<h3>Import users from CSV</h3><p class="small muted">Columns: <code>name,email,roll_no,department,password</code> (password optional, default <code>welcome123</code>). Existing emails are skipped.</p>
+    <label>Import as</label><select id="r"><option value="student">Students</option><option value="faculty">Faculty</option></select>
+    <input type="file" id="f" accept=".csv,.txt" style="margin-top:10px"><textarea id="d" style="margin-top:8px;min-height:120px;font-family:monospace;font-size:.82rem" placeholder="name,email,roll_no,department,password"></textarea>
+    <div class="row" style="justify-content:flex-end;margin-top:12px"><button class="btn ghost" id="x">Cancel</button><button class="btn" id="ok">Import</button></div>`);
+  const v = (s) => m.el.querySelector(s);
+  v('#f').onchange = async (e) => { if (e.target.files[0]) v('#d').value = await e.target.files[0].text(); };
+  v('#x').onclick = m.close;
+  v('#ok').onclick = async () => { try { const r = await App.post('/api/admin/users/bulk', { role: v('#r').value, data: v('#d').value }); m.close(); App.toast(`${r.added} added${r.skipped.length ? ', ' + r.skipped.length + ' skipped' : ''}`, 4500); users(); } catch (e) { App.toast(e.message); } };
+}
+
+async function quizzes() {
+  const list = await App.get('/api/admin/quizzes');
+  view.innerHTML = `<div class="table-wrap"><table><thead><tr><th>Quiz</th><th>Faculty</th><th>Subject</th><th>Questions</th><th>Attempts</th><th>Violations</th><th>Status</th><th></th></tr></thead><tbody>
+    ${list.length ? list.map((q) => `<tr><td>${esc(q.title)}</td><td>${esc(q.faculty)}</td><td>${esc(q.subject || '-')}</td><td>${q.question_count}</td><td>${q.attempts}</td><td>${q.violations}</td>
+      <td><span class="badge ${q.published ? 'ok' : 'gray'}">${q.published ? 'Published' : 'Draft'}</span></td><td class="right"><button class="btn sm danger ghost" data-id="${q.id}" data-t="${esc(q.title)}">Delete</button></td></tr>`).join('') : '<tr><td colspan="8" class="center muted">No quizzes yet.</td></tr>'}
+    </tbody></table></div>`;
+  view.querySelectorAll('button[data-id]').forEach((b) => (b.onclick = async () => { if (await App.confirmBox(`Delete "${b.dataset.t}" and all results?`, 'Delete')) { await App.del(`/api/admin/quizzes/${b.dataset.id}`); quizzes(); } }));
+}
+
+async function flags() {
+  const list = await App.get('/api/admin/flags');
+  const label = (s) => (s || '').split(',').map((p) => { const [t, n] = p.split(' x'); return `<span class="badge warn" style="margin:1px">${esc(App.VIOLATION_LABELS[t] || t)} x${esc(n)}</span>`; }).join(' ');
+  view.innerHTML = `<div class="table-wrap"><table><thead><tr><th>Student</th><th>Quiz</th><th>Violations</th><th>What happened</th><th>Outcome</th><th>Started</th></tr></thead><tbody>
+    ${list.length ? list.map((r) => `<tr><td>${esc(r.name)} <span class="muted small">${esc(r.roll_no || '')}</span></td><td>${esc(r.title)}</td><td><span class="flag high">&#9873; ${r.violations}</span></td><td class="wrap">${label(r.breakdown)}</td>
+      <td>${r.status === 'auto_submitted' ? `<span class="badge bad">Auto-submitted (${esc((r.submit_reason || '').replace('_', ' '))})</span>` : r.status === 'in_progress' ? '<span class="badge warn">Live</span>' : '<span class="badge ok">Submitted</span>'}</td><td>${fmt(r.started_at)}</td></tr>`).join('') : '<tr><td colspan="6" class="center muted">No flagged attempts. Everyone is behaving.</td></tr>'}
+    </tbody></table></div>`;
+}
+
+async function news() {
+  const list = await App.get('/api/announcements');
+  view.innerHTML = `<div class="card" style="margin-bottom:16px"><h3>Post an announcement</h3><label>Title</label><input id="t"><label>Message</label><textarea id="b"></textarea><button class="btn" id="go" style="margin-top:10px">Post</button></div>
+    ${list.map((a) => `<div class="card" style="margin-bottom:12px"><div class="row between"><h3 style="margin:0">${esc(a.title)}</h3><button class="btn sm danger ghost" data-del="${a.id}">Delete</button></div><p style="white-space:pre-wrap;margin:.3rem 0">${esc(a.body)}</p><p class="muted small" style="margin:0">${esc(a.author)} &middot; ${fmt(a.created_at)}</p></div>`).join('')}`;
+  document.getElementById('go').onclick = async () => { try { await App.post('/api/announcements', { title: document.getElementById('t').value, body: document.getElementById('b').value }); news(); } catch (e) { App.toast(e.message); } };
+  view.querySelectorAll('[data-del]').forEach((b) => (b.onclick = async () => { await App.del(`/api/announcements/${b.dataset.del}`); news(); }));
+}
+
+async function audit() {
+  const list = await App.get('/api/admin/audit');
+  view.innerHTML = `<div class="table-wrap"><table><thead><tr><th>When</th><th>User</th><th>Action</th><th>Detail</th></tr></thead><tbody>
+    ${list.map((l) => `<tr><td>${fmt(l.created_at)}</td><td>${esc(l.email || '-')}</td><td>${esc(l.action)}</td><td class="wrap">${esc(l.detail)}</td></tr>`).join('')}</tbody></table></div>`;
+}
+overview();
+</script>
+</body>
+</html>
