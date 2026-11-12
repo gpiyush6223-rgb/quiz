@@ -9,11 +9,9 @@ const PORT = process.env.PORT || 3000;
 const PUBLIC_DIR = path.join(__dirname, 'public');
 
 // ---------- secret + tokens ----------
-const SECRET_FILE = path.join(__dirname, '.secret');
-let SECRET = process.env.JWT_SECRET;
+const SECRET = process.env.JWT_SECRET;
 if (!SECRET) {
-  if (fs.existsSync(SECRET_FILE)) SECRET = fs.readFileSync(SECRET_FILE, 'utf8').trim();
-  else { SECRET = crypto.randomBytes(32).toString('hex'); fs.writeFileSync(SECRET_FILE, SECRET); }
+  throw new Error('JWT_SECRET is missing');
 }
 const b64 = (b) => Buffer.from(b).toString('base64url');
 function signToken(payload) {
